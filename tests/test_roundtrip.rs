@@ -15,7 +15,7 @@ fn roundtrip_test(val: Value) {
     let decoded = de
         .read_value()
         .expect(&format!("deserialization failed for {:?}", val));
-    assert_eq!(decoded, val);
+    assert_eq!(*decoded, val);
 }
 
 #[test]

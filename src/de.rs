@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use byteorder::{BigEndian, ReadBytesExt};
 
@@ -8,12 +9,13 @@ use super::constant::{
 };
 use super::error::Error::SyntaxError;
 use super::error::{ErrorKind, Result};
-use super::value::{self, Definition, Value};
+use super::value::{self, Definition, Ref, Value};
 
 pub struct Deserializer<R: AsRef<[u8]>> {
     buffer: Cursor<R>,
     type_references: Vec<String>,
     class_references: Vec<Definition>,
+    object_references: Vec<Arc<Value>>,
 }
 
 impl<R: AsRef<[u8]>> Deserializer<R> {
@@ -22,6 +24,7 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
             buffer: Cursor::new(rd),
             type_references: Vec::new(),
             class_references: Vec::new(),
+            object_references: Vec::new(),
         }
     }
 
@@ -60,25 +63,28 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
 
     fn read_definition(&mut self) -> Result<()> {
         // TODO(lynskylate@gmail.com): optimize error
-        let name = match self.read_value() {
-            Ok(Value::String(n)) => Ok(n),
-            _ => self.error(ErrorKind::UnknownType),
-        }?;
-        let length = match self.read_value() {
-            Ok(Value::Int(l)) => Ok(l),
-            _ => self.error(ErrorKind::UnknownType),
-        }?;
+        let name = self
+            .read_value()
+            .map_err(|_| SyntaxError(ErrorKind::UnknownType))?
+            .as_str()
+            .ok_or_else(|| SyntaxError(ErrorKind::UnknownType))?
+            .to_string();
+        let length = self
+            .read_value()
+            .map_err(|_| SyntaxError(ErrorKind::UnknownType))?
+            .as_int()
+            .ok_or_else(|| SyntaxError(ErrorKind::UnknownType))?;
 
         let mut fields = Vec::new();
 
         for _ in 0..length {
-            match self.read_value() {
-                Ok(Value::String(s)) => fields.push(s),
-                Ok(v) => {
+            match &*self
+                .read_value()
+                .map_err(|_| SyntaxError(ErrorKind::UnknownType))?
+            {
+                Value::String(s) => fields.push(s.to_string()),
+                v => {
                     return self.error(ErrorKind::UnexpectedType(v.to_string()));
-                }
-                _ => {
-                    return self.error(ErrorKind::UnknownType);
                 }
             }
         }
@@ -116,13 +122,13 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
     /// The object instantiation creates a new object based on a previous definition.
     /// The integer value refers to the object definition.
     ///
-    fn read_object(&mut self, tag: Object) -> Result<Value> {
+    fn read_object(&mut self, tag: Object) -> Result<Arc<Value>> {
         let ref_id = match tag {
             Object::Compact(b) => b as usize - 0x60,
             Object::Normal => {
-                let val = self.read_value()?;
+                let val = &*self.read_value()?;
                 match val {
-                    Value::Int(i) => i as usize,
+                    Value::Int(i) => *i as usize,
                     _ => return self.error(ErrorKind::UnexpectedType(val.to_string())),
                 }
             }
@@ -137,9 +143,11 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
         let mut map = HashMap::new();
         for k in fields {
             let v = self.read_value()?;
-            map.insert(Value::String(k), v);
+            map.insert(Arc::new(Value::String(k)), v);
         }
-        Ok(Value::Map((name, map).into()))
+        let value = Arc::new(Value::Map((name, map).into()));
+        self.object_references.push(Arc::clone(&value));
+        Ok(value)
     }
 
     fn read_long_binary(&mut self, tag: u8) -> Result<Value> {
@@ -491,24 +499,23 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
     /// See http://hessian.caucho.com/doc/hessian-serialization.html##ref
     ///
     fn read_type(&mut self) -> Result<String> {
-        match self.read_value() {
-            Ok(Value::String(s)) => {
+        match &*self.read_value()? {
+            Value::String(s) => {
                 self.type_references.push(s.clone());
-                Ok(s)
+                Ok(s.clone())
             }
-            Ok(Value::Int(i)) => {
-                if let Some(res) = self.type_references.get(i as usize) {
+            Value::Int(i) => {
+                if let Some(res) = self.type_references.get(*i as usize) {
                     Ok(res.clone())
                 } else {
-                    self.error(ErrorKind::OutOfTypeRefRange(i as usize))
+                    self.error(ErrorKind::OutOfTypeRefRange(*i as usize))
                 }
             }
-            Ok(v) => self.error(ErrorKind::UnexpectedType(v.to_string())),
-            Err(e) => Err(e),
+            v => self.error(ErrorKind::UnexpectedType(v.to_string())),
         }
     }
 
-    fn read_varlength_map_internal(&mut self) -> Result<HashMap<Value, Value>> {
+    fn read_varlength_map_internal(&mut self) -> Result<HashMap<Arc<Value>, Arc<Value>>> {
         let mut map = HashMap::new();
         let mut tag = self.peek_byte()?;
         while tag != b'Z' {
@@ -521,7 +528,7 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
         Ok(map)
     }
 
-    fn read_varlength_list_internal(&mut self) -> Result<Vec<Value>> {
+    fn read_varlength_list_internal(&mut self) -> Result<Vec<Arc<Value>>> {
         let mut tag = self.peek_byte()?;
         let mut list = Vec::new();
         while tag != b'Z' {
@@ -532,7 +539,7 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
         Ok(list)
     }
 
-    fn read_exact_length_list_internal(&mut self, length: usize) -> Result<Vec<Value>> {
+    fn read_exact_length_list_internal(&mut self, length: usize) -> Result<Vec<Arc<Value>>> {
         let mut list = Vec::new();
         for _ in 0..length {
             list.push(self.read_value()?)
@@ -565,9 +572,8 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
     /// The type and length are encoded by integers,
     /// where the type is a reference to an earlier specified type.
     ///
-    fn read_list(&mut self, list: List) -> Result<Value> {
-        // TODO(lynskylate@gmail.com): Should add list to reference, but i don't know any good way to deal with it
-        match list {
+    fn read_list(&mut self, list: List) -> Result<Arc<Value>> {
+        let value = match list {
             List::ShortFixedLength(typed, length) => {
                 let list = if typed {
                     let typ = self.read_type()?;
@@ -577,7 +583,7 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
                     let val = self.read_exact_length_list_internal(length)?;
                     value::List::from(val)
                 };
-                Ok(Value::List(list))
+                Value::List(list)
             }
             List::VarLength(typed) => {
                 let list = if typed {
@@ -588,28 +594,31 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
                     let val = self.read_varlength_list_internal()?;
                     value::List::from(val)
                 };
-                Ok(Value::List(list))
+                Value::List(list)
             }
             List::FixedLength(typed) => {
                 let list = if typed {
                     let typ = self.read_type()?;
-                    let length = match self.read_value()? {
-                        Value::Int(l) => l as usize,
+                    let length = match &*self.read_value()? {
+                        Value::Int(l) => *l as usize,
                         v => return self.error(ErrorKind::UnexpectedType(v.to_string())),
                     };
                     let val = self.read_exact_length_list_internal(length)?;
                     value::List::from((typ, val))
                 } else {
-                    let length = match self.read_value()? {
-                        Value::Int(l) => l as usize,
+                    let length = match &*self.read_value()? {
+                        Value::Int(l) => *l as usize,
                         v => return self.error(ErrorKind::UnexpectedType(v.to_string())),
                     };
                     let val = self.read_exact_length_list_internal(length)?;
                     value::List::from(val)
                 };
-                Ok(Value::List(list))
+                Value::List(list)
             }
-        }
+        };
+        let value = Arc::new(value);
+        self.object_references.push(Arc::clone(&value));
+        Ok(value)
     }
 
     /// read an map from buffer
@@ -633,14 +642,16 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
     ///
     /// The type is chosen by the service.
     ///
-    fn read_map(&mut self, typed: bool) -> Result<Value> {
+    fn read_map(&mut self, typed: bool) -> Result<Arc<Value>> {
         let map = if typed {
             let typ = self.read_type()?;
             value::Map::from((typ, self.read_varlength_map_internal()?))
         } else {
             value::Map::from(self.read_varlength_map_internal()?)
         };
-        Ok(Value::Map(map))
+        let value = Arc::new(Value::Map(map));
+        self.object_references.push(Arc::clone(&value));
+        Ok(value)
     }
 
     /// v2.0
@@ -653,41 +664,49 @@ impl<R: AsRef<[u8]>> Deserializer<R> {
     /// Each map or list is stored into an array as it is parsed.
     /// ref selects one of the stored objects. The first object is numbered '0'.
     ///
-    fn read_ref(&mut self) -> Result<Value> {
-        match self.read_value()? {
-            Value::Int(i) => Ok(Value::Ref(i as u32)),
+    fn read_ref(&mut self) -> Result<Arc<Value>> {
+        match &*self.read_value()? {
+            Value::Int(i) => {
+                let val = &self.object_references[*i as usize];
+                let ref_obj = Ref {
+                    ref_num: *i as usize,
+                    weak_ref: Arc::downgrade(val),
+                };
+                Ok(Arc::new(Value::Ref(ref_obj)))
+            }
             v => self.error(ErrorKind::UnexpectedType(v.to_string())),
         }
     }
 
     /// Read a hessian 2.0 value
-    pub fn read_value(&mut self) -> Result<Value> {
+    pub fn read_value(&mut self) -> Result<Arc<Value>> {
         let v = self.read_byte()?;
-        match ByteCodecType::from(v) {
-            ByteCodecType::Int(i) => self.read_int(i),
-            ByteCodecType::Long(l) => self.read_long(l),
-            ByteCodecType::Double(d) => self.read_double(d),
-            ByteCodecType::Date(d) => self.read_date(d),
-            ByteCodecType::Binary(bin) => self.read_binary(bin),
-            ByteCodecType::String(s) => self.read_string(s),
-            ByteCodecType::List(l) => self.read_list(l),
-            ByteCodecType::Map(typed) => self.read_map(typed),
-            ByteCodecType::True => Ok(Value::Bool(true)),
-            ByteCodecType::False => Ok(Value::Bool(false)),
-            ByteCodecType::Null => Ok(Value::Null),
+        let val = match ByteCodecType::from(v) {
+            ByteCodecType::Int(i) => Arc::new(self.read_int(i)?),
+            ByteCodecType::Long(l) => Arc::new(self.read_long(l)?),
+            ByteCodecType::Double(d) => Arc::new(self.read_double(d)?),
+            ByteCodecType::Date(d) => Arc::new(self.read_date(d)?),
+            ByteCodecType::Binary(bin) => Arc::new(self.read_binary(bin)?),
+            ByteCodecType::String(s) => Arc::new(self.read_string(s)?),
+            ByteCodecType::List(l) => self.read_list(l)?,
+            ByteCodecType::Map(typed) => self.read_map(typed)?,
+            ByteCodecType::True => Arc::new(Value::Bool(true)),
+            ByteCodecType::False => Arc::new(Value::Bool(false)),
+            ByteCodecType::Null => Arc::new(Value::Null),
             ByteCodecType::Definition => {
                 self.read_definition()?;
-                self.read_value()
+                self.read_value()?
             }
-            ByteCodecType::Ref => self.read_ref(),
-            ByteCodecType::Object(o) => self.read_object(o),
-            _ => self.error(ErrorKind::UnknownType),
-        }
+            ByteCodecType::Ref => self.read_ref()?,
+            ByteCodecType::Object(o) => self.read_object(o)?,
+            _ => return self.error(ErrorKind::UnknownType),
+        };
+        Ok(val)
     }
 }
 
 /// Read a hessain 2.0 value from a slice
-pub fn from_slice(v: &[u8]) -> Result<Value> {
+pub fn from_slice(v: &[u8]) -> Result<Arc<Value>> {
     let mut de = Deserializer::new(v);
     let value = de.read_value()?;
     Ok(value)
@@ -695,14 +714,15 @@ pub fn from_slice(v: &[u8]) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::Deserializer;
+    use super::{Deserializer, from_slice};
     use crate::value::Value;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn test_decode_ok(rdr: &[u8], target: Value) {
         let mut de = Deserializer::new(rdr);
         let value = de.read_value().unwrap();
-        assert_eq!(value, target);
+        assert_eq!(*value, target);
     }
 
     #[test]
@@ -851,15 +871,13 @@ mod tests {
 
     #[test]
     fn test_read_ref() {
-        let mut map = HashMap::new();
-        map.insert(Value::String("head".to_string()), Value::Int(1));
-        map.insert(Value::String("tail".to_string()), Value::Ref(0));
-        test_decode_ok(
-            &[
-                b'C', 0x0a, b'L', b'i', b'n', b'k', b'e', b'd', b'L', b'i', b's', b't', 0x92, 0x04,
-                b'h', b'e', b'a', b'd', 0x04, b't', b'a', b'i', b'l', b'O', 0x90, 0x91, 0x51, 0x90,
-            ],
-            Value::Map(("LinkedList", map).into()),
-        );
+        use crate::value::Ref;
+
+
+        let decoded = from_slice(&[
+            b'C', 0x0a, b'L', b'i', b'n', b'k', b'e', b'd', b'L', b'i', b's', b't', 0x92, 0x04,
+            b'h', b'e', b'a', b'd', 0x04, b't', b'a', b'i', b'l', b'O', 0x90, 0x91, 0x51, 0x90,
+        ]).unwrap();
+        println!("{:?}", decoded);
     }
 }

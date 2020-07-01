@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Weak};
 
 /// class definition
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,8 +18,8 @@ pub struct Definition {
 /// hessian 2.0 list
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum List {
-    Typed(String, Vec<Value>),
-    Untyped(Vec<Value>),
+    Typed(String, Vec<Arc<Value>>),
+    Untyped(Vec<Arc<Value>>),
 }
 
 impl List {
@@ -29,14 +30,14 @@ impl List {
         }
     }
 
-    pub fn value(&self) -> &[Value] {
+    pub fn value(&self) -> &[Arc<Value>] {
         match self {
             List::Typed(_, val) => val,
             List::Untyped(val) => val,
         }
     }
 
-    pub fn value_mut(&mut self) -> &mut [Value] {
+    pub fn value_mut(&mut self) -> &mut [Arc<Value>] {
         match self {
             List::Typed(_, val) => val,
             List::Untyped(val) => val,
@@ -46,24 +47,42 @@ impl List {
 
 impl From<Vec<Value>> for List {
     fn from(val: Vec<Value>) -> Self {
+        Self::Untyped(val.into_iter().map(Arc::new).collect())
+    }
+}
+
+impl From<Vec<Arc<Value>>> for List {
+    fn from(val: Vec<Arc<Value>>) -> Self {
         Self::Untyped(val)
     }
 }
 
 impl From<(String, Vec<Value>)> for List {
     fn from(val: (String, Vec<Value>)) -> Self {
+        Self::Typed(val.0, val.1.into_iter().map(Arc::new).collect())
+    }
+}
+
+impl From<(String, Vec<Arc<Value>>)> for List {
+    fn from(val: (String, Vec<Arc<Value>>)) -> Self {
         Self::Typed(val.0, val.1)
     }
 }
 
 impl From<(&str, Vec<Value>)> for List {
     fn from(val: (&str, Vec<Value>)) -> Self {
+        Self::Typed(val.0.to_string(), val.1.into_iter().map(Arc::new).collect())
+    }
+}
+
+impl From<(&str, Vec<Arc<Value>>)> for List {
+    fn from(val: (&str, Vec<Arc<Value>>)) -> Self {
         Self::Typed(val.0.to_string(), val.1)
     }
 }
 
 impl Deref for List {
-    type Target = [Value];
+    type Target = [Arc<Value>];
 
     fn deref(&self) -> &Self::Target {
         self.value()
@@ -79,8 +98,8 @@ impl DerefMut for List {
 /// hessian 2.0 map
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Map {
-    Typed(String, HashMap<Value, Value>),
-    Untyped(HashMap<Value, Value>),
+    Typed(String, HashMap<Arc<Value>, Arc<Value>>),
+    Untyped(HashMap<Arc<Value>, Arc<Value>>),
 }
 
 impl Map {
@@ -91,14 +110,14 @@ impl Map {
         }
     }
 
-    pub fn value(&self) -> &HashMap<Value, Value> {
+    pub fn value(&self) -> &HashMap<Arc<Value>, Arc<Value>> {
         match self {
             Map::Typed(_, val) => val,
             Map::Untyped(val) => val,
         }
     }
 
-    pub fn value_mut(&mut self) -> &mut HashMap<Value, Value> {
+    pub fn value_mut(&mut self) -> &mut HashMap<Arc<Value>, Arc<Value>> {
         match self {
             Map::Typed(_, val) => val,
             Map::Untyped(val) => val,
@@ -108,24 +127,58 @@ impl Map {
 
 impl From<HashMap<Value, Value>> for Map {
     fn from(val: HashMap<Value, Value>) -> Self {
+        Self::Untyped(
+            val.into_iter()
+                .map(|(k, v)| (Arc::new(k), Arc::new(v)))
+                .collect(),
+        )
+    }
+}
+
+impl From<HashMap<Arc<Value>, Arc<Value>>> for Map {
+    fn from(val: HashMap<Arc<Value>, Arc<Value>>) -> Self {
         Self::Untyped(val)
     }
 }
 
 impl From<(String, HashMap<Value, Value>)> for Map {
     fn from(val: (String, HashMap<Value, Value>)) -> Self {
+        Self::Typed(
+            val.0,
+            val.1
+                .into_iter()
+                .map(|(k, v)| (Arc::new(k), Arc::new(v)))
+                .collect(),
+        )
+    }
+}
+
+impl From<(String, HashMap<Arc<Value>, Arc<Value>>)> for Map {
+    fn from(val: (String, HashMap<Arc<Value>, Arc<Value>>)) -> Self {
         Self::Typed(val.0, val.1)
     }
 }
 
 impl From<(&str, HashMap<Value, Value>)> for Map {
     fn from(val: (&str, HashMap<Value, Value>)) -> Self {
+        Self::Typed(
+            val.0.to_string(),
+            val.1
+                .into_iter()
+                .map(|(k, v)| (Arc::new(k), Arc::new(v)))
+                .collect(),
+        )
+    }
+}
+
+impl From<(&str, HashMap<Arc<Value>, Arc<Value>>)> for Map {
+    fn from(val: (&str, HashMap<Arc<Value>, Arc<Value>>)) -> Self {
         Self::Typed(val.0.to_string(), val.1)
     }
 }
 
 impl Deref for Map {
-    type Target = HashMap<Value, Value>;
+    type Target = HashMap<Arc<Value>, Arc<Value>>;
 
     fn deref(&self) -> &Self::Target {
         self.value()
@@ -135,6 +188,38 @@ impl Deref for Map {
 impl DerefMut for Map {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.value_mut()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Ref {
+    pub ref_num: usize,
+    pub weak_ref: Weak<Value>,
+}
+
+impl PartialEq for Ref {
+    fn eq(&self, other: &Self) -> bool {
+        self.weak_ref.ptr_eq(&other.weak_ref)
+    }
+}
+
+impl PartialOrd for Ref {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.ref_num.cmp(&other.ref_num))
+    }
+}
+
+impl Eq for Ref {}
+
+impl Hash for Ref {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ref_num.hash(state)
+    }
+}
+
+impl Ord for Ref {
+    fn cmp(&self, other: &Ref) -> Ordering {
+        self.ref_num.cmp(&other.ref_num)
     }
 }
 
@@ -158,7 +243,7 @@ pub enum Value {
     /// UTF8-encoded string
     String(String),
     /// shared and circular object references
-    Ref(u32),
+    Ref(Ref),
     // list for lists and arrays
     List(List),
     /// map for maps and dictionaries
@@ -285,8 +370,8 @@ impl Value {
         self.as_str().is_some()
     }
 
-    pub fn as_ref(&self) -> Option<u32> {
-        match *self {
+    pub fn as_ref(&self) -> Option<&Ref> {
+        match self {
             Value::Ref(r) => Some(r),
             _ => None,
         }
@@ -346,12 +431,12 @@ impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
         use self::Value::*;
 
-        match *self {
+        match self {
             Null => ().hash(state),
             Bool(b) => b.hash(state),
             Int(i) => i.hash(state),
             Long(l) => l.hash(state),
-            Double(d) => OrderedFloat(d).hash(state),
+            Double(d) => OrderedFloat(*d).hash(state),
             Date(d) => d.hash(state),
             Bytes(ref bytes) => bytes.hash(state),
             String(ref s) => s.hash(state),
@@ -367,26 +452,26 @@ impl Ord for Value {
     fn cmp(&self, other: &Value) -> Ordering {
         use self::Value::*;
 
-        match *self {
+        match self {
             Null => match *other {
                 Null => Ordering::Equal,
                 _ => Ordering::Less,
             },
             Bool(b) => match *other {
                 Null => Ordering::Greater,
-                Int(i) => (b as i32).cmp(&i),
-                Long(l) => (b as i64).cmp(&l),
-                Double(d) => float_ord(b as i64 as f64, d),
-                Date(d) => (b as i64).cmp(&d),
+                Int(i) => (*b as i32).cmp(&i),
+                Long(l) => (*b as i64).cmp(&l),
+                Double(d) => float_ord(*b as i64 as f64, d),
+                Date(d) => (*b as i64).cmp(&d),
                 _ => Ordering::Less,
             },
             Int(i) => match *other {
                 Null => Ordering::Greater,
                 Bool(b) => i.cmp(&(b as i32)),
                 Int(i2) => i.cmp(&i2),
-                Long(l) => (i as i64).cmp(&l),
-                Double(d) => float_ord(i as f64, d),
-                Date(d) => (i as i64).cmp(&d),
+                Long(l) => (*i as i64).cmp(&l),
+                Double(d) => float_ord(*i as f64, d),
+                Date(d) => (*i as i64).cmp(&d),
                 _ => Ordering::Less,
             },
             Long(l) => match *other {
@@ -394,17 +479,17 @@ impl Ord for Value {
                 Bool(b) => l.cmp(&(b as i64)),
                 Int(i2) => l.cmp(&(i2 as i64)),
                 Long(l2) => l.cmp(&l2),
-                Double(d) => float_ord(l as f64, d),
+                Double(d) => float_ord(*l as f64, d),
                 Date(d) => l.cmp(&d),
                 _ => Ordering::Less,
             },
             Double(d) => match *other {
                 Null => Ordering::Greater,
-                Bool(b) => float_ord(d, b as i64 as f64),
-                Int(i) => float_ord(d, i as f64),
-                Long(l) => float_ord(d, l as f64),
-                Double(d2) => float_ord(d, d2),
-                Date(d2) => float_ord(d, d2 as f64),
+                Bool(b) => float_ord(*d, b as i64 as f64),
+                Int(i) => float_ord(*d, i as f64),
+                Long(l) => float_ord(*d, l as f64),
+                Double(d2) => float_ord(*d, d2),
+                Date(d2) => float_ord(*d, d2 as f64),
                 _ => Ordering::Less,
             },
             Date(d) => match *other {
@@ -412,7 +497,7 @@ impl Ord for Value {
                 Bool(b) => d.cmp(&(b as i64)),
                 Int(i2) => d.cmp(&(i2 as i64)),
                 Long(l2) => d.cmp(&l2),
-                Double(d2) => float_ord(d as f64, d2),
+                Double(d2) => float_ord(*d as f64, d2),
                 Date(d2) => d.cmp(&d2),
                 _ => Ordering::Less,
             },
@@ -426,7 +511,7 @@ impl Ord for Value {
                 String(ref s2) => s.cmp(s2),
                 _ => Ordering::Greater,
             },
-            Ref(i) => match *other {
+            Ref(i) => match other {
                 List(_) | Map(_) => Ordering::Less,
                 Ref(i2) => i.cmp(&i2),
                 _ => Ordering::Greater,

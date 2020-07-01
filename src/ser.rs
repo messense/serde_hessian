@@ -4,7 +4,7 @@ use byteorder::{BigEndian, WriteBytesExt};
 use indexmap::{IndexMap, IndexSet};
 
 use super::error::Result;
-use super::value::{self, Definition, Value};
+use super::value::{self, Definition, Value, Ref};
 
 pub struct Serializer<'a, W> {
     writer: &'a mut W,
@@ -67,15 +67,15 @@ impl<'a, W: io::Write> Serializer<'a, W> {
     }
 
     pub fn serialize_value(&mut self, value: &Value) -> Result<()> {
-        match *value {
-            Value::Int(i) => self.serialize_int(i),
+        match value {
+            Value::Int(i) => self.serialize_int(*i),
             Value::Bytes(ref b) => self.serialize_binary(b),
             Value::String(ref s) => self.serialize_string(s.as_str()),
-            Value::Bool(b) => self.serialize_bool(b),
+            Value::Bool(b) => self.serialize_bool(*b),
             Value::Null => self.serialize_null(),
-            Value::Long(l) => self.serialize_long(l),
-            Value::Date(d) => self.serialize_date(d),
-            Value::Double(d) => self.serialize_double(d),
+            Value::Long(l) => self.serialize_long(*l),
+            Value::Date(d) => self.serialize_date(*d),
+            Value::Double(d) => self.serialize_double(*d),
             Value::Ref(i) => self.serialize_ref(i),
             Value::List(ref l) => self.serialize_list(l),
             Value::Map(ref m) => self.serialize_map(m),
@@ -176,9 +176,9 @@ impl<'a, W: io::Write> Serializer<'a, W> {
         Ok(())
     }
 
-    fn serialize_ref(&mut self, ref_num: u32) -> Result<()> {
+    fn serialize_ref(&mut self, ref_num: &Ref) -> Result<()> {
         self.writer.write_u8(0x51)?;
-        self.serialize_int(ref_num as i32)?;
+        self.serialize_int(ref_num.ref_num as i32)?;
         Ok(())
     }
 
@@ -430,11 +430,11 @@ mod tests {
     fn test_encode_type() {
         let mut buf = Vec::new();
         let mut ser = Serializer::new(&mut buf);
-        let first_list = value::List::from(("[int".to_string(), vec![Value::Int(1).into()]));
+        let first_list = value::List::from(("[int".to_string(), vec![Value::Int(1)]));
         ser.serialize_list(&first_list).unwrap();
         assert_eq!(ser.type_cache.len(), 1);
         assert_eq!(ser.type_cache.get_index_of("[int"), Some(0));
-        let second_list = value::List::from(("[int".to_string(), vec![Value::Int(1).into()]));
+        let second_list = value::List::from(("[int".to_string(), vec![Value::Int(1)]));
         ser.serialize_list(&second_list).unwrap();
         assert_eq!(ser.type_cache.len(), 1);
     }
